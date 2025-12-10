@@ -1,0 +1,41 @@
+# 速度场预测配置文件
+# 基于ResNet-UNet模型
+
+# 项目信息
+project_name: "VelocityPrediction"
+model_name: "ResNet_UNet_Velocity"
+
+# 数据设置
+data_module: "VelocitySDFDataModule"
+data_dir: "./data/train_velocity_vtk"
+index_file_dir: "./data/train_velocity_vtk"
+n_train: 450
+n_test: 50
+sdf_spatial_resolution: [64, 64, 64]
+
+# 模型设置
+in_channels: 4  # 1通道SDF + 3通道坐标
+out_channels: 3  # 速度分量 vx, vy, vz
+hidden_channels: 48  # 特征图通道数
+use_attention: true
+
+# 训练设置
+num_epochs: 100
+batch_size: 1
+eval_batch_size: 1
+lr: 0.001
+weight_decay: 0.02
+
+# 损失函数权重
+rel_weight: 0.8
+r2_weight: 0.2
+
+# 标准化类型
+normalizer_type: "standard"
+
+# 评估设置
+test_interval: 10
+track: "Velocity_Dataset"
+
+# 设备设置
+device: "cuda"
