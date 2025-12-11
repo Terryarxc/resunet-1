@@ -9,6 +9,10 @@ import sys
 # 添加父目录到路径，以便导入共享模块
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 获取脚本所在目录，用于构建输出路径
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+
 import argparse
 import torch
 import torch.nn as nn
@@ -212,7 +216,8 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device):
 
 def evaluate(model, datamodule, config, loss_fn, device, track="Velocity_Dataset"):
     """评估模型"""
-    os.makedirs(f"./output/{track}", exist_ok=True)
+    output_track_dir = os.path.join(OUTPUT_DIR, track)
+    os.makedirs(output_track_dir, exist_ok=True)
     test_loader = datamodule.test_dataloader(
         batch_size=config["eval_batch_size"],
         shuffle=False,
@@ -267,7 +272,7 @@ def evaluate(model, datamodule, config, loss_fn, device, track="Velocity_Dataset
             # 保存预测结果（反标准化后）
             pred_decoded = datamodule.decode(pred.cpu())
             test_idx = datamodule.test_indices[i]
-            save_path = f"./output/{track}/vel_pred_{str(test_idx).zfill(3)}.npy"
+            save_path = os.path.join(output_track_dir, f"vel_pred_{str(test_idx).zfill(3)}.npy")
             np.save(save_path, pred_decoded.numpy())
 
     n = max(num_batches, 1)
@@ -334,12 +339,12 @@ def main():
     test_interval = config.get("test_interval", 10)
 
     # 创建输出目录
-    os.makedirs("output/", exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # 初始化训练历史记录
     training_history = []
 
-    history_file = os.path.join("./output/", f"training_history_{config['model_name']}.json")
+    history_file = os.path.join(OUTPUT_DIR, f"training_history_{config['model_name']}.json")
     print(f"训练历史将保存到: {history_file}")
 
     # 初始化数据模块
@@ -381,19 +386,24 @@ def main():
 
     # 初始化优化器
     weight_decay = config.get("weight_decay", 0.02)
+    beta1 = config.get("beta1", 0.9)
+    beta2 = config.get("beta2", 0.999)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config["lr"],
         weight_decay=weight_decay,
-        betas=(0.9, 0.999)
+        betas=(beta1, beta2)
     )
 
     # 初始化学习率调度器
+    t0 = config.get("t0", 8)
+    t_mult = config.get("t_mult", 1)
+    eta_min_factor = config.get("eta_min_factor", 0.001)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        T_0=8,
-        T_mult=1,
-        eta_min=config["lr"] * 0.001
+        T_0=t0,
+        T_mult=t_mult,
+        eta_min=config["lr"] * eta_min_factor
     )
 
     # 初始化损失函数
@@ -406,15 +416,18 @@ def main():
     )
 
     print(f"损失函数权重: rel_weight={rel_weight}, r2_weight={r2_weight}")
+    print(f"优化器参数: beta1={beta1}, beta2={beta2}")
+    print(f"学习率调度器: T_0={t0}, T_mult={t_mult}, eta_min_factor={eta_min_factor}")
 
     # 训练参数
     best_train_loss = float('inf')
     best_test_loss = float('inf')
     best_epoch = -1
     best_test_metrics = None
+    warmup_epochs = config.get("warmup_epochs", 8)
 
     print(f"\n开始训练 {config['model_name']} 模型，共{config['num_epochs']}个epoch")
-    print(f"每 {test_interval} 个epoch在测试集上评估一次模型")
+    print(f"预热轮数: {warmup_epochs}, 每 {test_interval} 个epoch在测试集上评估一次模型")
 
     epoch_pbar = tqdm(range(config["num_epochs"]), desc="总进度")
 
@@ -423,15 +436,15 @@ def main():
             torch.cuda.empty_cache()
 
         # 学习率预热
-        if ep < 8:
+        if ep < warmup_epochs:
             for param_group in optimizer.param_groups:
-                param_group['lr'] = config["lr"] * (ep + 1) / 8
+                param_group['lr'] = config["lr"] * (ep + 1) / warmup_epochs
 
         # 训练一个epoch
         train_metrics = train_epoch(model, train_loader, optimizer, loss_fn, device)
 
         # 更新学习率
-        if ep >= 8:
+        if ep >= warmup_epochs:
             scheduler.step()
 
         # 打印训练指标
@@ -469,7 +482,7 @@ def main():
                 best_epoch = ep
                 best_test_metrics = test_metrics
 
-                save_path = os.path.join("./output/", f"best_model-{config['model_name']}.pth")
+                save_path = os.path.join(OUTPUT_DIR, f"best_model-{config['model_name']}.pth")
                 save_checkpoint(model, optimizer, scheduler, ep, test_metrics, save_path)
                 print(f"\n发现更好的模型！保存到: {save_path}")
                 print(f"当前最佳测试损失: {best_test_loss:.6f} (Epoch {best_epoch})")
@@ -493,7 +506,8 @@ def main():
 
     print(f"\n训练完成！")
     print(f"最佳模型在第 {best_epoch} 个epoch")
-    print(f"最佳模型保存在: ./output/best_model-{config['model_name']}.pth")
+    model_name = config['model_name']
+    print(f"最佳模型保存在: {os.path.join(OUTPUT_DIR, f'best_model-{model_name}.pth')}")
 
     if best_test_metrics:
         print("\n最佳模型在测试集上的结果:")
