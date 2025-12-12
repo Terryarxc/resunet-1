@@ -85,6 +85,29 @@ def velocity(polydata):
     return vel
 
 
+def get_triangles_from_vtk(polydata):
+    """从VTK polydata中提取三角形面片索引
+    
+    支持三角形和四边形网格，四边形会被拆分成2个三角形
+    """
+    cells = polydata.GetCells()
+    cell_array = vtk_to_numpy(cells.GetData())
+    
+    triangles = []
+    i = 0
+    while i < len(cell_array):
+        n_points = cell_array[i]
+        if n_points == 3:  # 三角形
+            triangles.append(cell_array[i+1:i+4])
+        elif n_points == 4:  # 四边形，拆分成2个三角形
+            v0, v1, v2, v3 = cell_array[i+1:i+5]
+            triangles.append([v0, v1, v2])
+            triangles.append([v0, v2, v3])
+        i += n_points + 1
+    
+    return np.array(triangles, dtype=np.int32)
+
+
 class DictDataset(Dataset):
     """字典数据集"""
     def __init__(self, data_dict: dict):
@@ -184,9 +207,11 @@ class VelocitySDFDataModule(BaseDataModule):
         print(f"训练集样本数: {len(train_indices)}")
         print(f"测试集样本数: {len(test_indices)}")
         
-        # 获取vtk文件路径
+        # 获取vtk文件路径（流场数据和汽车表面网格）
         train_vtk_paths = [self.get_vtk_path(data_dir, i) for i in train_indices]
         test_vtk_paths = [self.get_vtk_path(data_dir, i) for i in test_indices]
+        train_mesh_paths = [self.get_mesh_vtk_path(data_dir, i) for i in train_indices]
+        test_mesh_paths = [self.get_mesh_vtk_path(data_dir, i) for i in test_indices]
         
         self.test_vtk_paths = test_vtk_paths
         self.test_indices = test_indices
@@ -203,10 +228,11 @@ class VelocitySDFDataModule(BaseDataModule):
         # 处理训练数据
         print("\n处理训练数据...")
         train_data_list = [
-            self.load_vtk_data(vtk_path, query_points)
-            for vtk_path in train_vtk_paths
+            self.load_vtk_data(vtk_path, mesh_path, query_points)
+            for vtk_path, mesh_path in zip(train_vtk_paths, train_mesh_paths)
         ]
         train_sdf = torch.stack([torch.tensor(d['sdf']) for d in train_data_list])
+        train_direction = torch.stack([torch.tensor(d['direction']) for d in train_data_list])
         train_vertices = torch.stack([torch.tensor(d['vertices']) for d in train_data_list])
         train_velocity = torch.stack([torch.tensor(d['velocity']) for d in train_data_list])
         del train_data_list
@@ -214,10 +240,11 @@ class VelocitySDFDataModule(BaseDataModule):
         # 处理测试数据
         print("\n处理测试数据...")
         test_data_list = [
-            self.load_vtk_data(vtk_path, query_points)
-            for vtk_path in test_vtk_paths
+            self.load_vtk_data(vtk_path, mesh_path, query_points)
+            for vtk_path, mesh_path in zip(test_vtk_paths, test_mesh_paths)
         ]
         test_sdf = torch.stack([torch.tensor(d['sdf']) for d in test_data_list])
+        test_direction = torch.stack([torch.tensor(d['direction']) for d in test_data_list])
         test_vertices = torch.stack([torch.tensor(d['vertices']) for d in test_data_list])
         test_velocity = torch.stack([torch.tensor(d['velocity']) for d in test_data_list])
         del test_data_list
@@ -249,10 +276,17 @@ class VelocitySDFDataModule(BaseDataModule):
             torch.tensor(query_points), min_bounds_t, max_bounds_t
         ).permute(3, 0, 1, 2)
         
+        # 方向向量转换为 [3, D, H, W] 格式
+        train_direction = train_direction.permute(0, 4, 1, 2, 3)  # [B, 3, D, H, W]
+        test_direction = test_direction.permute(0, 4, 1, 2, 3)
+        
+        print(f"\n方向向量形状: 训练集={train_direction.shape}, 测试集={test_direction.shape}")
+        
         # 构建数据集 - 速度保持 [N, 3] 形状
         self._train_data = DictDatasetWithConstant(
             {
                 "sdf": train_sdf,
+                "direction": train_direction,  # 新增方向向量
                 "vertices": train_vertices,
                 "velocity": train_velocity_norm
             },
@@ -262,6 +296,7 @@ class VelocitySDFDataModule(BaseDataModule):
         self._test_data = DictDatasetWithConstant(
             {
                 "sdf": test_sdf,
+                "direction": test_direction,  # 新增方向向量
                 "vertices": test_vertices,
                 "velocity": test_velocity_norm
             },
@@ -279,57 +314,95 @@ class VelocitySDFDataModule(BaseDataModule):
         return self._test_data
     
     def get_vtk_path(self, data_dir: Path, mesh_ind: int) -> Path:
-        """获取vtk文件路径，支持 vel_###.vtk 命名格式"""
+        """获取流场vtk文件路径 (vel_###.vtk)"""
         vtk_path = data_dir / f"vel_{str(mesh_ind).zfill(3)}.vtk"
         if not vtk_path.exists():
-            # 尝试 mesh_###.vtk 格式
-            vtk_path = data_dir / f"mesh_{str(mesh_ind).zfill(3)}.vtk"
-        if not vtk_path.exists():
-            raise FileNotFoundError(f"VTK文件不存在: {vtk_path}")
+            raise FileNotFoundError(f"流场VTK文件不存在: {vtk_path}")
         return vtk_path
     
-    def load_vtk_data(self, vtk_path: Path, query_points: np.ndarray) -> dict:
-        """加载VTK文件数据"""
-        _, polydata = read_vtk(str(vtk_path))
+    def get_mesh_vtk_path(self, data_dir: Path, mesh_ind: int) -> Path:
+        """获取汽车表面网格vtk文件路径 (mesh_###.vtk)"""
+        mesh_path = data_dir / f"mesh_{str(mesh_ind).zfill(3)}.vtk"
+        if not mesh_path.exists():
+            raise FileNotFoundError(f"汽车表面VTK文件不存在: {mesh_path}")
+        return mesh_path
+    
+    def load_vtk_data(self, vtk_path: Path, mesh_vtk_path: Path, query_points: np.ndarray) -> dict:
+        """加载VTK文件数据
         
-        # 获取顶点和速度
-        vertices = nodes(polydata)
-        vel = velocity(polydata)
+        Args:
+            vtk_path: 流场数据文件 (vel_###.vtk)
+            mesh_vtk_path: 汽车表面网格文件 (mesh_###.vtk)
+            query_points: SDF查询点网格
+        """
+        # 读取流场数据
+        _, vel_polydata = read_vtk(str(vtk_path))
+        vertices = nodes(vel_polydata)
+        vel = velocity(vel_polydata)
         
-        print(f"加载 {vtk_path.name}: 顶点数={vertices.shape[0]}, 速度形状={vel.shape}")
+        # 读取汽车表面网格
+        _, mesh_polydata = read_vtk(str(mesh_vtk_path))
+        mesh_vertices = nodes(mesh_polydata)
+        mesh_triangles = get_triangles_from_vtk(mesh_polydata)
         
-        # 计算SDF
-        sdf = self.compute_sdf_from_vertices(vertices, query_points)
+        print(f"加载 {vtk_path.name}: 流场点数={vertices.shape[0]}, 速度形状={vel.shape}")
+        print(f"加载 {mesh_vtk_path.name}: 表面顶点数={mesh_vertices.shape[0]}, 三角形数={mesh_triangles.shape[0]}")
+        
+        # 使用汽车表面网格计算SDF和方向向量
+        sdf, direction = self.compute_sdf_and_direction(mesh_vertices, mesh_triangles, query_points)
         
         return {
             'vertices': vertices,
             'velocity': vel,
-            'sdf': sdf
+            'sdf': sdf,
+            'direction': direction  # 新增方向向量
         }
     
-    def compute_sdf_from_vertices(self, vertices: np.ndarray, query_points: np.ndarray) -> np.ndarray:
+    def compute_sdf_and_direction(self, vertices: np.ndarray, triangles: np.ndarray, query_points: np.ndarray) -> tuple:
         """
-        从顶点计算SDF
-        这里使用简化方法：创建点云并计算到最近点的距离
+        从汽车表面三角形网格计算SDF和方向向量
+        
+        Args:
+            vertices: 汽车表面顶点 [N, 3]
+            triangles: 三角形面片索引 [M, 3]
+            query_points: 查询点网格 [64, 64, 64, 3]
+        
+        Returns:
+            sdf: 有符号距离场 [64, 64, 64]
+            direction: 方向向量（指向最近表面点） [64, 64, 64, 3]
         """
-        # 创建点云
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(vertices)
+        # 创建Open3D三角形网格
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(vertices.astype(np.float64))
+        mesh.triangles = o3d.utility.Vector3iVector(triangles)
         
-        # 构建KD树
-        kdtree = o3d.geometry.KDTreeFlann(pcd)
+        # 转换为tensor格式用于光线投射
+        mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
         
-        # 计算每个查询点到最近顶点的距离
-        query_flat = query_points.reshape(-1, 3)
-        distances = np.zeros(query_flat.shape[0], dtype=np.float32)
+        # 创建光线投射场景
+        scene = o3d.t.geometry.RaycastingScene()
+        _ = scene.add_triangles(mesh_t)
         
-        for i, qp in enumerate(query_flat):
-            [k, idx, dist] = kdtree.search_knn_vector_3d(qp, 1)
-            distances[i] = np.sqrt(dist[0])
+        query_flat = query_points.reshape(-1, 3).astype(np.float32)
+        query_tensor = o3d.core.Tensor(query_flat, dtype=o3d.core.Dtype.Float32)
+        
+        # 计算有符号距离
+        signed_distance = scene.compute_signed_distance(query_tensor).numpy()
+        
+        # 计算最近点，用于获取方向向量
+        closest_points = scene.compute_closest_points(query_tensor)['points'].numpy()
+        
+        # 计算方向向量：从查询点指向最近表面点
+        direction = closest_points - query_flat
+        # 归一化方向向量
+        direction_norm = np.linalg.norm(direction, axis=1, keepdims=True) + 1e-8
+        direction = direction / direction_norm
         
         # 重塑为网格形状
-        sdf = distances.reshape(query_points.shape[:-1])
-        return sdf
+        sdf = signed_distance.reshape(query_points.shape[:-1]).astype(np.float32)
+        direction = direction.reshape(query_points.shape).astype(np.float32)
+        
+        return sdf, direction
     
     def load_bound(self, data_dir, filename="watertight_global_bounds.txt", eps=1e-06):
         """加载边界信息"""

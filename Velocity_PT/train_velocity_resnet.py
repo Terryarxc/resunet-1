@@ -86,7 +86,7 @@ def parse_args(config_file_path=None):
     parser.add_argument('--normalizer_type', type=str, default='standard',
                         choices=['standard', 'minmax', 'robust', 'none'],
                         help='速度场标准化类型')
-    parser.add_argument('--test_interval', type=int, default=10,
+    parser.add_argument('--test_interval', type=int, default=None,
                         help='每隔多少个epoch测试一次模型')
 
     return parser.parse_args()
@@ -396,13 +396,10 @@ def main():
     )
 
     # 初始化学习率调度器
-    t0 = config.get("t0", 8)
-    t_mult = config.get("t_mult", 1)
     eta_min_factor = config.get("eta_min_factor", 0.001)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_0=t0,
-        T_mult=t_mult,
+        T_max=config["num_epochs"] - config.get("warmup_epochs", 8),
         eta_min=config["lr"] * eta_min_factor
     )
 
@@ -417,7 +414,7 @@ def main():
 
     print(f"损失函数权重: rel_weight={rel_weight}, r2_weight={r2_weight}")
     print(f"优化器参数: beta1={beta1}, beta2={beta2}")
-    print(f"学习率调度器: T_0={t0}, T_mult={t_mult}, eta_min_factor={eta_min_factor}")
+    print(f"学习率调度器: CosineAnnealingLR, T_max={config['num_epochs'] - config.get('warmup_epochs', 8)}, eta_min_factor={eta_min_factor}")
 
     # 训练参数
     best_train_loss = float('inf')

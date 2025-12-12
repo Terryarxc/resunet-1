@@ -13,27 +13,31 @@ def data_dict_to_input(data_dict):
     输入:
         data_dict: 包含以下键的字典
             - sdf: SDF体素数据 [B, D, H, W]
+            - direction: 方向向量 [B, 3, D, H, W]
             - sdf_query_points: 查询点坐标 [3, D, H, W]
             - vertices: 顶点坐标 [B, N, 3]
             - velocity: 速度场数据 [B, N, 3] (可选，训练时使用)
     
     输出:
-        input_grid_features: 模型输入 [B, 4, D, H, W] (1通道SDF + 3通道坐标)
+        input_grid_features: 模型输入 [B, 7, D, H, W] (1通道SDF + 3通道坐标 + 3通道方向向量)
         output_points: 输出点坐标 [B, N, 3]
     """
     # SDF数据增加通道维度 [B, D, H, W] -> [B, 1, D, H, W]
-    input_grid_features = data_dict['sdf'].unsqueeze(1)
+    sdf = data_dict['sdf'].unsqueeze(1)
+    
+    # 方向向量 [B, 3, D, H, W]
+    direction = data_dict['direction']
     
     # 查询点坐标 [3, D, H, W]
     grid_points = data_dict['sdf_query_points']
     
-    # 拼接SDF和坐标 [B, 1, D, H, W] + [3, D, H, W] -> [B, 4, D, H, W]
-    # 需要扩展grid_points以匹配batch维度
+    # 扩展grid_points以匹配batch维度
     if grid_points.dim() == 4:
-        grid_points = grid_points.unsqueeze(0).expand(input_grid_features.shape[0], -1, -1, -1, -1)
+        grid_points = grid_points.unsqueeze(0).expand(sdf.shape[0], -1, -1, -1, -1)
     
+    # 拼接SDF + 坐标 + 方向向量 -> [B, 7, D, H, W]
     input_grid_features = torch.cat(
-        tensors=(input_grid_features, grid_points),
+        tensors=(sdf, grid_points, direction),
         dim=1
     )
     

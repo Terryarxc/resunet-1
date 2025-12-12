@@ -14,7 +14,7 @@ n_test: 50
 sdf_spatial_resolution: [64, 64, 64]
 
 # 模型设置
-in_channels: 4  # 1通道SDF + 3通道坐标
+in_channels: 7  # 1通道SDF + 3通道坐标 + 3通道方向向量
 out_channels: 3  # 速度分量 vx, vy, vz
 hidden_channels: 48  # 特征图通道数
 use_attention: true
@@ -37,14 +37,14 @@ eta_min_factor: 0.0001
 warmup_epochs: 8
 
 # 损失函数权重（针对速度场优化）
-rel_weight: 0.6
-r2_weight: 0.4
+rel_weight: 0.7
+r2_weight: 0.3
 
 # 标准化类型
 normalizer_type: "standard"
 
 # 评估设置
-test_interval: 10
+test_interval: 5
 track: "Velocity_Dataset"
 
 # 设备设置
